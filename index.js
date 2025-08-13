@@ -235,17 +235,6 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
 // ───────────────────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true }));
 
-// ───────────────────────────────────────────────────────────────────────────────
-// Shopify: prefill
-// ───────────────────────────────────────────────────────────────────────────────
-app.get('/shopify/prefill', async (req, res) => {
-  try {
-    const STORE = process.env.SHOPIFY_STORE_DOMAIN;
-    const TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
-    theAPI = process.env.SHOPIFY_API_VERSION || '2024-07'; // harmless typo fix? no—keep as const
-  } catch {}
-});
-
 app.get('/shopify/prefill', async (req, res) => {
   try {
     const STORE = process.env.SHOPIFY_STORE_DOMAIN;
