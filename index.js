@@ -11,6 +11,8 @@ const crypto = require('crypto');
 const app = express();
 // JSON body parser (1MB basta e avanza)
 app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: false }));
+
 
 // --- helper timingSafeEqual anche se le lunghezze differiscono ---
 function safeEqHex(a, b) {
@@ -396,14 +398,17 @@ app.post('/registrazione', regLimiter, async (req, res) => {
 // Endpoint di debug token (da rimuovere a fine test)
 // ───────────────────────────────────────────────────────────────────────────────
 app.post('/debug/token-check', (req, res) => {
-  const body = req.body || {};
-  const hdr  = req.get('x-prefill-token') || req.get('authorization')?.replace(/^Bearer\s+/i,'') || '';
-  const tok  = body.prefillToken || hdr || req.query.token || '';
-  const orderRef = body.orderName || body.orderId || req.query.orderRef || '';
-  const email = body.email || req.query.email || '';
+  const b = req.body || {};
+  const hdr = req.get('x-prefill-token') || (req.get('authorization') || '').replace(/^Bearer\s+/i, '') || '';
+
+  const tok = b.token || b.prefillToken || req.query.token || hdr || '';
+  const orderRef = b.orderRef || b.orderName || b.orderId || req.query.orderRef || req.query.orderName || req.query.orderId || '';
+  const email = (b.email || req.query.email || '').toLowerCase();
+
   const v = verifyPrefillToken(tok, orderRef, email);
   res.json({ ok: v.ok, reason: v.reason, decoded: v.decoded, provided: { orderRef, email } });
 });
+
 
 // ───────────────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
