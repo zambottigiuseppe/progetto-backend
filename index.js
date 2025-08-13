@@ -121,18 +121,20 @@ function createPrefillToken(orderRef, email) {
 function verifyPrefillToken(token, orderRefFromBody, emailFromBody) {
   if (!SECRET) return { ok:false, reason:'NO_SECRET' };
 
-  const parts = String(token || '').split('.');
-  if (parts.length !== 4) return { ok:false, reason:'BAD_FORMAT' };
+  const raw = String(token || '');
+const parts = raw.split('.');
+if (parts.length < 4) return { ok:false, reason:'BAD_FORMAT' };
 
-  const t = Number(parts[0]);
-  const sig = parts[1];
-  let ref, em;
-  try {
-    ref = decodeURIComponent(parts[2] || '');
-    em  = decodeURIComponent(parts[3] || '').toLowerCase();
-  } catch {
-    return { ok:false, reason:'DECODE_FAIL' };
-  }
+const [tStr, sig, refEnc, ...emailParts] = parts;
+const t = Number(tStr);
+let ref, em;
+try {
+  ref = decodeURIComponent(refEnc || '');
+  em  = decodeURIComponent(emailParts.join('.') || '').toLowerCase();
+} catch {
+  return { ok:false, reason:'DECODE_FAIL' };
+}
+
 
   if (!t || !sig || !ref) return { ok:false, reason:'BAD_FIELDS' };
   if (Date.now() - t > PREFILL_TTL_MS) return { ok:false, reason:'EXPIRED' };
