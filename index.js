@@ -9,14 +9,11 @@ const crypto = require('crypto');
 // App & parsers
 // ───────────────────────────────────────────────────────────────────────────────
 const app = express();
-// JSON body parser (1MB basta e avanza)
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));
 
-
 // --- helper timingSafeEqual anche se le lunghezze differiscono ---
 function safeEqHex(a, b) {
-  // confronta due stringhe (esadecimali) in modo “timing-safe”
   const A = Buffer.from(String(a || ''), 'utf8');
   const B = Buffer.from(String(b || ''), 'utf8');
   if (A.length !== B.length) {
@@ -27,7 +24,6 @@ function safeEqHex(a, b) {
   }
   return crypto.timingSafeEqual(A, B);
 }
-
 
 // ───────────────────────────────────────────────────────────────────────────────
 // Security headers (API-only)
@@ -49,8 +45,8 @@ const ALLOWED = (process.env.ALLOWED_ORIGINS || '')
 
 app.use(cors({
   origin(origin, cb) {
-    if (!origin) return cb(null, true);            // consenti curl/postman
-    cb(null, ALLOWED.includes(origin));            // solo origini whitelisted
+    if (!origin) return cb(null, true);
+    cb(null, ALLOWED.includes(origin));
   },
   credentials: false
 }));
@@ -107,7 +103,7 @@ const db = admin.firestore();
 // ───────────────────────────────────────────────────────────────────────────────
 // Prefill token HMAC (SECRET DEVE essere lo stesso ovunque)
 // ───────────────────────────────────────────────────────────────────────────────
-const SECRET = process.env.ADMIN_API_KEY || '';              // <— importante!
+const SECRET = process.env.ADMIN_API_KEY || '';
 const PREFILL_TTL_MS = Number(process.env.PREFILL_TTL_MS || 45 * 60 * 1000); // 45 min
 
 function createPrefillToken(orderRef, email) {
@@ -115,7 +111,6 @@ function createPrefillToken(orderRef, email) {
   const e = (email || '').toLowerCase();
   const msg = `${orderRef}|${e}|${t}`;
   const sig = crypto.createHmac('sha256', SECRET).update(msg).digest('hex');
-  // orderRef/email codificati per non rompere con '#'
   return `${t}.${sig}.${encodeURIComponent(orderRef)}.${encodeURIComponent(e)}`;
 }
 
@@ -124,19 +119,18 @@ function verifyPrefillToken(token, orderRefFromBody, emailFromBody) {
   if (!SECRET) return { ok:false, reason:'NO_SECRET' };
 
   const raw = String(token || '');
-const parts = raw.split('.');
-if (parts.length < 4) return { ok:false, reason:'BAD_FORMAT' };
+  const parts = raw.split('.');
+  if (parts.length < 4) return { ok:false, reason:'BAD_FORMAT' };
 
-const [tStr, sig, refEnc, ...emailParts] = parts;
-const t = Number(tStr);
-let ref, em;
-try {
-  ref = decodeURIComponent(refEnc || '');
-  em  = decodeURIComponent(emailParts.join('.') || '').toLowerCase();
-} catch {
-  return { ok:false, reason:'DECODE_FAIL' };
-}
-
+  const [tStr, sig, refEnc, ...emailParts] = parts;
+  const t = Number(tStr);
+  let ref, em;
+  try {
+    ref = decodeURIComponent(refEnc || '');
+    em  = decodeURIComponent(emailParts.join('.') || '').toLowerCase();
+  } catch {
+    return { ok:false, reason:'DECODE_FAIL' };
+  }
 
   if (!t || !sig || !ref) return { ok:false, reason:'BAD_FIELDS' };
   if (Date.now() - t > PREFILL_TTL_MS) return { ok:false, reason:'EXPIRED' };
@@ -145,7 +139,6 @@ try {
   const expect = crypto.createHmac('sha256', SECRET).update(msg).digest('hex');
   if (!safeEqHex(sig, expect)) return { ok:false, reason:'BAD_HMAC' };
 
-  // normalizza input body
   const normRefBody   = String(orderRefFromBody || '').trim();
   const normEmailBody = String(emailFromBody || '').trim().toLowerCase();
 
@@ -177,11 +170,82 @@ function pickToken(req) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
+// Solo CARRELLI: config + helper (inattivo se STRICT_CARRELLI=false)
+// ───────────────────────────────────────────────────────────────────────────────
+const STRICT_CARRELLI = String(process.env.STRICT_CARRELLI || 'false') === 'true';
+const toList = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean).map(x => x.toLowerCase());
+const CART_TAGS    = toList(process.env.CART_TAGS    || 'carrello,carrelli,trolley,stewart,stewart-golf,preordine-stewart');
+const CART_TYPES   = toList(process.env.CART_TYPES   || 'carrello,electric trolley,golf trolley');
+const CART_VENDORS = toList(process.env.CART_VENDORS || 'stewart golf');
+
+function isCarrelloMeta({ productType, vendor, tags }) {
+  const t = String(productType || '').toLowerCase();
+  const v = String(vendor || '').toLowerCase();
+  const tagArr = Array.isArray(tags)
+    ? tags.map(s => String(s || '').toLowerCase())
+    : String(tags || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  const hasTag   = tagArr.some(tag => CART_TAGS.some(k => tag.includes(k)));
+  const typeOk   = t && CART_TYPES.some(k => t.includes(k));
+  const vendorOk = v && CART_VENDORS.some(k => v.includes(k));
+  return !!(hasTag || typeOk || vendorOk);
+}
+
+async function orderHasCarrelloByRefEmail(refInput, emailLower) {
+  try {
+    const STORE = process.env.SHOPIFY_STORE_DOMAIN;
+    const TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
+    const API_VERSION = process.env.SHOPIFY_API_VERSION || '2024-07';
+    if (!STORE || !TOKEN) return { ok:false, reason:'CONFIG_MANCANTE' };
+
+    const name = String(refInput || '').startsWith('#') ? refInput : `#${refInput}`;
+    const restURL = `https://${STORE}/admin/api/${API_VERSION}/orders.json?status=any&name=${encodeURIComponent(name)}`;
+    const r = await fetch(restURL, { headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json' }});
+    if (!r.ok) return { ok:false, reason:'REST_FAIL' };
+
+    const data = await r.json();
+    const order = data?.orders?.[0];
+    if (!order) return { ok:false, reason:'ORDINE_NON_TROVATO' };
+
+    const orderEmail = (order.email || '').toLowerCase();
+    const custEmail  = (order.customer?.email || '').toLowerCase();
+    if (emailLower && !(emailLower === orderEmail || emailLower === custEmail)) {
+      return { ok:false, reason:'EMAIL_MISMATCH' };
+    }
+
+    const items = order.line_items || [];
+    for (const line of items) {
+      const pid = line.product_id;
+      if (!pid) continue;
+      const pr = await fetch(`https://${STORE}/admin/api/${API_VERSION}/products/${pid}.json`, {
+        headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json' }
+      });
+      if (!pr.ok) continue;
+      const P = (await pr.json())?.product || {};
+      const tagsArr = String(P.tags || '').split(',').map(s => s.trim()).filter(Boolean);
+      if (isCarrelloMeta({ productType: P.product_type, vendor: P.vendor, tags: tagsArr })) {
+        return { ok:true, product: { id:P.id, title:line.title, type:P.product_type, vendor:P.vendor, tags:tagsArr } };
+      }
+    }
+    return { ok:false, reason:'NON_CARRELLO', product: { title: items[0]?.title || '', id: items[0]?.product_id || null } };
+  } catch (e) {
+    return { ok:false, reason:'CHECK_ERROR', error: e.message };
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true }));
 
 // ───────────────────────────────────────────────────────────────────────────────
 // Shopify: prefill
 // ───────────────────────────────────────────────────────────────────────────────
+app.get('/shopify/prefill', async (req, res) => {
+  try {
+    const STORE = process.env.SHOPIFY_STORE_DOMAIN;
+    const TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
+    theAPI = process.env.SHOPIFY_API_VERSION || '2024-07'; // harmless typo fix? no—keep as const
+  } catch {}
+});
+
 app.get('/shopify/prefill', async (req, res) => {
   try {
     const STORE = process.env.SHOPIFY_STORE_DOMAIN;
@@ -305,7 +369,7 @@ app.post('/registrazione', regLimiter, async (req, res) => {
 
     const orderRef = p.orderName || p.orderId || '';
 
-    // --- Token pick + log debug (fondamentale) ---
+    // --- Token pick + log debug ---
     const tok = pickToken(req);
     console.log('[REG]', new Date().toISOString(), {
       origin: req.get('origin'),
@@ -321,17 +385,24 @@ app.post('/registrazione', regLimiter, async (req, res) => {
       const v = verifyPrefillToken(token, orderRef, p.email);
       if (!v.ok) {
         console.warn('[TOKEN_INVALIDO]', {
-          reason: v.reason,
-          decoded: v.decoded,
+          reason: v.reason, decoded: v.decoded,
           provided: { orderRef, email: (p.email || '').toLowerCase() }
         });
         return res.status(400).json({
-          ok:false,
-          error:'TOKEN_INVALIDO',
-          reason: v.reason,
-          decoded: v.decoded,
+          ok:false, error:'TOKEN_INVALIDO',
+          reason: v.reason, decoded: v.decoded,
           provided: { orderRef, email: (p.email || '').toLowerCase() }
         });
+      }
+      // Solo carrelli (se abilitato via ENV)
+      if (STRICT_CARRELLI) {
+        const ref = (v.decoded?.ref || orderRef || '').trim();
+        const em  = (v.decoded?.em || p.email || '').toLowerCase().trim();
+        const chk = await orderHasCarrelloByRefEmail(ref, em);
+        if (!chk.ok) {
+          console.warn('[NON_CARRELLO]', { ref, em, reason: chk.reason, details: chk.product });
+          return res.status(400).json({ ok:false, error: chk.reason, details: chk.product || null });
+        }
       }
     }
 
@@ -370,7 +441,8 @@ app.post('/registrazione', regLimiter, async (req, res) => {
       }
     } catch (e) { console.error('Email fallita:', e.message); }
 
-    return res.json({ ok:true, id: regId });
+    // ➜ flag per reset UI lato front-end
+    return res.json({ ok:true, id: regId, reset: true });
   } catch (err) {
     if (err && (err.code === 6 || /ALREADY_EXISTS/i.test(String(err.message)))) {
       try {
@@ -408,7 +480,6 @@ app.post('/debug/token-check', (req, res) => {
   const v = verifyPrefillToken(tok, orderRef, email);
   res.json({ ok: v.ok, reason: v.reason, decoded: v.decoded, provided: { orderRef, email } });
 });
-
 
 // ───────────────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
