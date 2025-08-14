@@ -172,7 +172,7 @@ function pickToken(req) {
 // ───────────────────────────────────────────────────────────────────────────────
 // Solo CARRELLI: config + helper (inattivo se STRICT_CARRELLI=false)
 // ───────────────────────────────────────────────────────────────────────────────
-const STRICT_CARRELLI = String(process.env.STRICT_CARRELLI || 'false') === 'true';
+const STRICT_CARRELLI = /^(true|1|yes)$/i.test(String(process.env.STRICT_CARRELLI || 'false'));
 const toList = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean).map(x => x.toLowerCase());
 const CART_TAGS    = toList(process.env.CART_TAGS    || 'carrello,carrelli,trolley,stewart,stewart-golf,preordine-stewart');
 const CART_TYPES   = toList(process.env.CART_TYPES   || 'carrello,electric trolley,golf trolley');
@@ -203,6 +203,14 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
     if (!r.ok) return { ok:false, reason:'REST_FAIL' };
 
     const data = await r.json();
+    // blocco immediato se non è un carrello
+if (data.carrello && data.carrello.ok === false) {
+  const titolo = data.carrello?.product?.title || 'prodotto non valido';
+  msg(pfMsg, `❌ Questo ordine non è un CARRELLO (${titolo}). La registrazione garanzia è disponibile solo per i carrelli.`, false);
+  form.classList.add('wu-hidden');
+  return;
+}
+
     const order = data?.orders?.[0];
     if (!order) return { ok:false, reason:'ORDINE_NON_TROVATO' };
 
@@ -277,7 +285,7 @@ app.get('/shopify/prefill', async (req, res) => {
       }
     }
 
-    // 2) Fallback GraphQL (name+email)
+    // 2) Fallback GraphQL
     if (!prefill) {
       const q = `
         query($first:Int!, $query:String!) {
@@ -319,7 +327,18 @@ app.get('/shopify/prefill', async (req, res) => {
     const orderRef = prefill.orderName || prefill.orderId;
     const token = SECRET ? createPrefillToken(orderRef, prefill.email) : null;
 
-    return res.json({ ok:true, prefill, token, ttl: PREFILL_TTL_MS });
+    // ➜ NOVITÀ: esito “carrello o no” (se STRICT_CARRELLI attivo)
+    let carrello = { ok: true };
+    if (STRICT_CARRELLI) {
+      try {
+        const chk = await orderHasCarrelloByRefEmail(orderRef, (prefill.email||'').toLowerCase());
+        carrello = chk;
+      } catch (e) {
+        carrello = { ok:false, reason:'CHECK_ERROR', error:String(e?.message||e) };
+      }
+    }
+
+    return res.json({ ok:true, prefill, token, ttl: PREFILL_TTL_MS, carrello });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok:false, error: err.message });
