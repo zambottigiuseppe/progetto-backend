@@ -1,6 +1,5 @@
-// index.js
-// PATCHED: 2025-08-14 — filtro carrelli aggiornato
-// SOLO ESEMPIO MINIMALE FUNZIONANTE CON FUNZIONE orderHasCarrelloByRefEmail
+
+// index.js - VERSIONE CORRETTA
 
 const express = require('express');
 const admin = require('firebase-admin');
@@ -9,7 +8,7 @@ const fetch = require('node-fetch');
 const app = express();
 app.use(express.json());
 
-// Firebase setup (mock)
+// Firebase init (mock config fallback)
 const SA_JSON = process.env.FIREBASE_SERVICE_ACCOUNT || '{}';
 const creds = JSON.parse(SA_JSON);
 if (admin.apps.length === 0) admin.initializeApp({ credential: admin.credential.cert(creds) });
@@ -18,16 +17,16 @@ if (admin.apps.length === 0) admin.initializeApp({ credential: admin.credential.
 // CARRELLI — filtro aggiornato
 // ───────────────────────────────────────────────────────────────────────────────
 const STRICT_CARRELLI = /^(true|1|yes)$/i.test(String(process.env.STRICT_CARRELLI || 'false'));
-const TITLE_RE = /(carrello|trolley|follow|remote)|^(?:q|x|r)[-\s]?\w+/i;
-const NEG_RE = /(ricambi|spare|accessor(i|y|ies)|guscio|cover|ruota|wheel|batter(y|ia)|charger|caricatore|bag|sacca)/i;
+const TITLE_RE = /\b(carrello|trolley|follow|remote)\b|^(?:q|x|r)[-\s]?\w+/i;
+const NEG_RE = /\b(ricambi|spare|accessor(i|y|ies)|guscio|cover|ruota|wheel|batter(y|ia)|charger|caricatore|bag|sacca)\b/i;
 
 function isCarrelloMeta({ title, productType }) {
   const ttl = String(title || '').trim();
   const pty = String(productType || '').trim();
-  if (/carrello/i.test(ttl)) return true;
+  if (/\bcarrello\b/i.test(ttl)) return true;
   if (NEG_RE.test(ttl) || NEG_RE.test(pty)) return false;
   const titleOk = TITLE_RE.test(ttl);
-  const typeOk  = TITLE_RE.test(pty) || /golf\s*trolley/i.test(pty);
+  const typeOk  = TITLE_RE.test(pty) || /\bgolf\s*trolley\b/i.test(pty);
   return titleOk || typeOk;
 }
 
@@ -67,7 +66,7 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
 
     const search = `name:${name}`;
     const g = await fetchJsonWithTimeout(
-      \`https://\${STORE}/admin/api/\${API_VERSION}/graphql.json\`,
+      `https://${STORE}/admin/api/${API_VERSION}/graphql.json`,
       {
         method: 'POST',
         headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type': 'application/json' },
