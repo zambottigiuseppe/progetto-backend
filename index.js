@@ -185,6 +185,20 @@ function isCarrelloMeta({ title, productType }) {
   return !!(typeOk || titleOk);
 }
 
+// fetch JSON con timeout hard (default 12s)
+async function fetchJsonWithTimeout(url, opts = {}, ms = 12000) {
+  const ac = new AbortController();
+  const to = setTimeout(() => ac.abort(new Error('TIMEOUT')), ms);
+  try {
+    const r = await fetch(url, { ...opts, signal: ac.signal });
+    const j = await r.json().catch(() => ({}));
+    return { ok: r.ok, status: r.status, json: j };
+  } finally {
+    clearTimeout(to);
+  }
+}
+
+
 // Controlla se l'ordine contiene almeno un carrello
 async function orderHasCarrelloByRefEmail(refInput, emailLower) {
   try {
@@ -194,41 +208,86 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
     if (!STORE || !TOKEN) return { ok:false, reason:'CONFIG_MANCANTE' };
 
     const name = String(refInput || '').startsWith('#') ? refInput : `#${refInput}`;
-    const restURL = `https://${STORE}/admin/api/${API_VERSION}/orders.json?status=any&name=${encodeURIComponent(name)}`;
-    const r = await fetch(restURL, { headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json' }});
-    if (!r.ok) return { ok:false, reason:'REST_FAIL' };
 
-    const data  = await r.json();
-    const order = data?.orders?.[0];
+    // Un colpo solo: ordine + line items + prodotto (type/vendor/tags)
+    const query = `
+      query($first:Int!, $query:String!) {
+        orders(first:$first, query:$query, sortKey:CREATED_AT, reverse:true) {
+          edges { node {
+            name email
+            customer { email }
+            lineItems(first:25) {
+              edges { node {
+                title
+                product { id productType vendor tags title }
+              } }
+            }
+          } }
+        }
+      }`;
+
+    const search = `name:${name} AND email:${emailLower || '*'}`;
+    const g = await fetchJsonWithTimeout(
+      `https://${STORE}/admin/api/${API_VERSION}/graphql.json`,
+      {
+        method: 'POST',
+        headers: {
+          'X-Shopify-Access-Token': TOKEN,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ query, variables: { first: 1, query: search } })
+      },
+      12000 // timeout duro 12s
+    );
+
+    if (!g.ok) return { ok:false, reason:'GRAPHQL_FAIL', status:g.status };
+
+    const order = g.json?.data?.orders?.edges?.[0]?.node;
     if (!order) return { ok:false, reason:'ORDINE_NON_TROVATO' };
 
+    // Email match (tutela)
     const orderEmail = (order.email || '').toLowerCase();
     const custEmail  = (order.customer?.email || '').toLowerCase();
     if (emailLower && !(emailLower === orderEmail || emailLower === custEmail)) {
       return { ok:false, reason:'EMAIL_MISMATCH' };
     }
 
-    const items = order.line_items || [];
-    for (const line of items) {
-      const pid = line.product_id;
-      if (!pid) continue;
+    // Decide “carrello” su OGNI riga: tags/type/vendor oppure dal titolo
+    const edges = order.lineItems?.edges || [];
+    for (const e of edges) {
+      const li = e?.node || {};
+      const prod = li.product || {};
+      const tags = String(prod.tags || '').split(',').map(s => s.trim()).filter(Boolean);
+      const looksLikeCart =
+        isCarrelloMeta({ title: li.title || prod.title, productType: prod.productType, tags });
 
-      const pr = await fetch(`https://${STORE}/admin/api/${API_VERSION}/products/${pid}.json`, {
-        headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json' }
-      });
-      if (!pr.ok) continue;
-
-      const P = (await pr.json())?.product || {};
-      if (isCarrelloMeta({ title: String(line.title || P.title || ''), productType: P.product_type })) {
-        return { ok: true, product: { id: P.id, title: String(line.title || P.title || ''), type: P.product_type } };
+      if (looksLikeCart) {
+        return {
+          ok: true,
+          product: {
+            id: prod.id || null,
+            title: li.title || prod.title || '',
+            type: prod.productType || '',
+            vendor: prod.vendor || '',
+            tags
+          }
+        };
       }
     }
 
-    return { ok:false, reason:'NON_CARRELLO', product: { title: items[0]?.title || '', id: items[0]?.product_id || null } };
+    // Nessuna riga “carrello”
+    const firstTitle = edges[0]?.node?.title || '';
+    const firstPid   = edges[0]?.node?.product?.id || null;
+    return { ok:false, reason:'NON_CARRELLO', product: { title:firstTitle, id:firstPid } };
+
   } catch (e) {
-    return { ok:false, reason:'CHECK_ERROR', error: e.message };
+    // Timeout o eccezione → meglio fallire veloce
+    const msg = String(e && e.message || e || '');
+    if (msg.includes('TIMEOUT')) return { ok:false, reason:'CHECK_TIMEOUT' };
+    return { ok:false, reason:'CHECK_ERROR', error: msg };
   }
 }
+
 
 // ───────────────────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true }));
