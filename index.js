@@ -166,26 +166,26 @@ function pickToken(req) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// Solo CARRELLI (config + helpers) — niente vendor per evitare falsi positivi
+// Solo CARRELLI (config + helpers) — niente TAG né VENDOR: solo tipo/titolo
 // ───────────────────────────────────────────────────────────────────────────────
 const STRICT_CARRELLI = /^(true|1|yes)$/i.test(String(process.env.STRICT_CARRELLI || 'false'));
-const toList = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean).map(x => x.toLowerCase());
-const CART_TAGS  = toList(process.env.CART_TAGS  || 'carrello,carrelli,trolley,electric trolley,golf trolley');
-const CART_TYPES = toList(process.env.CART_TYPES || 'carrello,electric trolley,golf trolley');
 
-function isCarrelloMeta({ title, productType, tags }) {
+// Riconosce carrelli solo se il product_type parla di trolley/carrello
+// o se il titolo contiene keyphrase tipiche (Q Follow, Q Remote, R1-S, X9, X10, VertX, trolley, carrello…)
+function isCarrelloMeta({ title, productType }) {
   const t = String(productType || '').toLowerCase();
-  const tagArr = Array.isArray(tags)
-    ? tags.map(s => String(s || '').toLowerCase())
-    : String(tags || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-  const hasTag   = tagArr.some(tag => CART_TAGS.some(k => tag.includes(k)));
-  const typeOk   = t && CART_TYPES.some(k => t.includes(k));   // ← FIX: parentesi
   const titleStr = String(title || '').toLowerCase();
-  const titleOk  = /\b(carrell[oi]|trolley)\b/.test(titleStr);
-  return !!(hasTag || typeOk || titleOk);
+
+  const typeOk =
+    /\b(carrello|trolley|electric\s*trolley|golf\s*trolley)\b/.test(t);
+
+  const titleOk =
+    /\b(q\s*follow|q\s*remote|r1-?s|x9|x10|vertx|trolley|carrell[oi])\b/.test(titleStr);
+
+  return !!(typeOk || titleOk);
 }
 
-// Controlla se l'ordine contiene almeno un "carrello"
+// Controlla se l'ordine contiene almeno un carrello
 async function orderHasCarrelloByRefEmail(refInput, emailLower) {
   try {
     const STORE = process.env.SHOPIFY_STORE_DOMAIN;
@@ -212,16 +212,18 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
     for (const line of items) {
       const pid = line.product_id;
       if (!pid) continue;
+
       const pr = await fetch(`https://${STORE}/admin/api/${API_VERSION}/products/${pid}.json`, {
         headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json' }
       });
       if (!pr.ok) continue;
+
       const P = (await pr.json())?.product || {};
-      const tagsArr = String(P.tags || '').split(',').map(s => s.trim()).filter(Boolean);
-      if (isCarrelloMeta({ title: String(line.title || P.title || ''), productType: P.product_type, tags: tagsArr })) {
-        return { ok: true, product: { id: P.id, title: String(line.title || P.title || ''), type: P.product_type, tags: tagsArr } };
+      if (isCarrelloMeta({ title: String(line.title || P.title || ''), productType: P.product_type })) {
+        return { ok: true, product: { id: P.id, title: String(line.title || P.title || ''), type: P.product_type } };
       }
     }
+
     return { ok:false, reason:'NON_CARRELLO', product: { title: items[0]?.title || '', id: items[0]?.product_id || null } };
   } catch (e) {
     return { ok:false, reason:'CHECK_ERROR', error: e.message };
@@ -305,7 +307,7 @@ app.get('/shopify/prefill', async (req, res) => {
           email: edge.email || edge.customer?.email || '',
           telefono: ship.phone || edge.customer?.phone || '',
           indirizzo: [ship.address1, ship.address2].filter(Boolean).join(', '),
-          citta: ship.city || '', cap: ship.zip || '', provincia: ship.province || '', paese: ship.country || '',
+          citta: ship.city || '', cap: ship.zip || '', provincia: ship.provincia || ship.province || '', paese: ship.country || '',
           modello: edge.lineItems?.edges?.[0]?.node?.title || '',
           dataOrdine: edge.createdAt || '',
           orderId: edge.id, orderName: edge.name
