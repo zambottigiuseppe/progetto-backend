@@ -223,7 +223,7 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
       }`;
     const search = `name:${name} AND email:${emailLower || '*'}`;
     const g = await fetchJsonWithTimeout(
-      \`https://${STORE}/admin/api/${API_VERSION}/graphql.json\`,
+      `https://${STORE}/admin/api/${API_VERSION}/graphql.json`,
       {
         method: 'POST',
         headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type': 'application/json' },
@@ -257,7 +257,6 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
           }
         };
       }
-    }
     const firstTitle = edges[0]?.node?.title || '';
     const firstPid   = edges[0]?.node?.product?.id || null;
     return { ok:false, reason:'NON_CARRELLO', product: { title:firstTitle, id:firstPid } };
@@ -267,7 +266,6 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
     return { ok:false, reason:'CHECK_ERROR', error: msg };
   }
 }
-
 
 // ───────────────────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true }));
