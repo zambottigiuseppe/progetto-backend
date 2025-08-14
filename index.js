@@ -168,22 +168,28 @@ function pickToken(req) {
 // ───────────────────────────────────────────────────────────────────────────────
 // Solo CARRELLI (config + helpers)
 // ───────────────────────────────────────────────────────────────────────────────
+// Solo CARRELLI (config + helpers)
 const STRICT_CARRELLI = /^(true|1|yes)$/i.test(String(process.env.STRICT_CARRELLI || 'false'));
 const toList = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean).map(x => x.toLowerCase());
-const CART_TAGS    = toList(process.env.CART_TAGS    || 'carrello,carrelli,trolley,stewart,stewart-golf,preordine-stewart');
-const CART_TYPES   = toList(process.env.CART_TYPES   || 'carrello,electric trolley,golf trolley');
+
+// ⚠️ Niente vendor di default: solo parole chiave utili
+const CART_TAGS  = toList(process.env.CART_TAGS  || 'carrello,carrelli,trolley,electric trolley,golf trolley');
+const CART_TYPES = toList(process.env.CART_TYPES || 'carrello,electric trolley,golf trolley');
 const CART_VENDORS = toList(process.env.CART_VENDORS || 'stewart golf');
 
-function isCarrelloMeta({ productType, vendor, tags }) {
+// Un prodotto è “carrello” se ha TAG o TYPE coerenti, oppure il TITOLO parla chiaramente di trolley/carrello
+function isCarrelloMeta({ title, productType, tags }) {
   const t = String(productType || '').toLowerCase();
-  const v = String(vendor || '').toLowerCase();
   const tagArr = Array.isArray(tags)
     ? tags.map(s => String(s || '').toLowerCase())
     : String(tags || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-  const hasTag   = tagArr.some(tag => CART_TAGS.some(k => tag.includes(k)));
-  const typeOk   = t && CART_TYPES.some(k => t.includes(k));
-  const vendorOk = v && CART_VENDORS.some(k => v.includes(k));
-  return !!(hasTag || typeOk || vendorOk);
+
+  const hasTag    = tagArr.some(tag => CART_TAGS.some(k => tag.includes(k)));
+  const typeOk    = t && CART_TYPES.some(k => t.includes(k));
+  const titleStr  = String(title || '').toLowerCase();
+  const titleOk   = /\b(carrell[oi]|trolley)\b/.test(titleStr);
+
+  return !!(hasTag || typeOk || titleOk);
 }
 
 async function orderHasCarrelloByRefEmail(refInput, emailLower) {
@@ -224,8 +230,8 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
       const P = (await pr.json())?.product || {};
       const tagsArr = String(P.tags || '').split(',').map(s => s.trim()).filter(Boolean);
 
-      if (isCarrelloMeta({ productType: P.product_type, vendor: P.vendor, tags: tagsArr })) {
-        return {
+      if (isCarrelloMeta({ title: String(line.title || P.title || ''), productType: P.product_type, tags: tagsArr })) {
+
           ok: true,
           product: { id: P.id, title: line.title, type: P.product_type, vendor: P.vendor, tags: tagsArr }
         };
