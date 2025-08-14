@@ -166,13 +166,38 @@ function pickToken(req) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// Solo CARRELLI (switch ENV)
+// Solo CARRELLI (config + helpers) — stretta per evitare i ricambi
 // ───────────────────────────────────────────────────────────────────────────────
 const STRICT_CARRELLI = /^(true|1|yes)$/i.test(String(process.env.STRICT_CARRELLI || 'false'));
 
-// ───────────────────────────────────────────────────────────────────────────────
-// Riconoscimento “carrello” SOLO dai titoli delle linee d’ordine (robusto/semplice)
-// ───────────────────────────────────────────────────────────────────────────────
+// Parole chiave POSITIVE sul titolo (copre X9/X10/Q-Follow/Remote/Trolley/Carrello)
+const TITLE_RE = /(trolley|carrell|^x[0-9]{1,2}\b|^q[-\s]?\w+|follow|remote)/i;
+// Parole chiave NEGATIVE (ricambi/accessori ecc.)
+const NEG_RE   = /(ricambi|spare|accessor(i|y|ies)|guscio|cover|ruota|wheel|batter(y|ia)|charger|caricatore|bag|sacca)/i;
+
+// Riconosce carrelli: si basa soprattutto sul TITOLO, ed evita i ricambi
+function isCarrelloMeta({ title, productType }) {
+  const ttl = String(title || '');
+  if (NEG_RE.test(ttl)) return false;         // se puzza di ricambio → NO
+  const titleOk = TITLE_RE.test(ttl);         // titolo da carrello?
+  // product_type usato solo per “trolley” espliciti (niente “Carrelli … Ricambi”)
+  const t = String(productType || '');
+  const typeOk  = /\btrolley\b/i.test(t) || /\bgolf\s*trolley\b/i.test(t);
+  return titleOk || typeOk;
+}
+
+// fetch JSON con timeout hard (12s)
+async function fetchJsonWithTimeout(url, opts = {}, ms = 12000) {
+  const ac = new AbortController();
+  const to = setTimeout(() => ac.abort(new Error('TIMEOUT')), ms);
+  try {
+    const r = await fetch(url, { ...opts, signal: ac.signal });
+    const j = await r.json().catch(() => ({}));
+    return { ok: r.ok, status: r.status, json: j };
+  } finally { clearTimeout(to); }
+}
+
+// Controlla se l'ordine contiene almeno un carrello (GraphQL una sola chiamata)
 async function orderHasCarrelloByRefEmail(refInput, emailLower) {
   try {
     const STORE = process.env.SHOPIFY_STORE_DOMAIN;
@@ -180,16 +205,35 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
     const API_VERSION = process.env.SHOPIFY_API_VERSION || '2024-07';
     if (!STORE || !TOKEN) return { ok:false, reason:'CONFIG_MANCANTE' };
 
-    const TITLE_RE = /(carrell|trolley|^x[0-9]{1,2}\b|^q[-\s]?\w+|follow|remote)/i;
     const name = String(refInput || '').startsWith('#') ? refInput : `#${refInput}`;
+    const query = `
+      query($first:Int!, $query:String!) {
+        orders(first:$first, query:$query, sortKey:CREATED_AT, reverse:true) {
+          edges { node {
+            id name email
+            customer { email }
+            lineItems(first:25) {
+              edges { node {
+                title
+                product { id productType vendor title }
+              } }
+            }
+          } }
+        }
+      }`;
+    const search = `name:${name} AND email:${emailLower || '*'}`;
+    const g = await fetchJsonWithTimeout(
+      \`https://${STORE}/admin/api/${API_VERSION}/graphql.json\`,
+      {
+        method: 'POST',
+        headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, variables: { first: 1, query: search } })
+      },
+      12000
+    );
+    if (!g.ok) return { ok:false, reason:'GRAPHQL_FAIL', status:g.status };
 
-    // Ordine con line_items: basta il REST
-    const url = `https://${STORE}/admin/api/${API_VERSION}/orders.json?status=any&name=${encodeURIComponent(name)}&fields=name,email,customer,line_items`;
-    const r = await fetch(url, { headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json' }});
-    if (!r.ok) return { ok:false, reason:'REST_FAIL', status:r.status };
-
-    const data  = await r.json().catch(() => ({}));
-    const order = data?.orders?.[0];
+    const order = g.json?.data?.orders?.edges?.[0]?.node;
     if (!order) return { ok:false, reason:'ORDINE_NON_TROVATO' };
 
     const orderEmail = (order.email || '').toLowerCase();
@@ -198,25 +242,32 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
       return { ok:false, reason:'EMAIL_MISMATCH' };
     }
 
-    const items = order.line_items || [];
-    for (const line of items) {
-      const title  = String(line?.title || '');
-      const vendor = String(line?.vendor || '');
-      if (TITLE_RE.test(title) || /stewart/i.test(vendor)) {
-        return { ok:true, product: { title, id: line.product_id || null } };
+    const edges = order.lineItems?.edges || [];
+    for (const e of edges) {
+      const li   = e?.node || {};
+      const prod = li.product || {};
+      if (isCarrelloMeta({ title: li.title || prod.title, productType: prod.productType })) {
+        return {
+          ok: true,
+          product: {
+            id: prod.id || null,
+            title: li.title || prod.title || '',
+            type: prod.productType || '',
+            vendor: prod.vendor || ''
+          }
+        };
       }
     }
-
-    // Nessuna riga "carrello"
-    const firstTitle = items[0]?.title || '';
-    const firstPid   = items[0]?.product_id || null;
+    const firstTitle = edges[0]?.node?.title || '';
+    const firstPid   = edges[0]?.node?.product?.id || null;
     return { ok:false, reason:'NON_CARRELLO', product: { title:firstTitle, id:firstPid } };
-
   } catch (e) {
-    const msg = String(e?.message || e || '');
+    const msg = String(e && e.message || e || '');
+    if (msg.includes('TIMEOUT')) return { ok:false, reason:'CHECK_TIMEOUT' };
     return { ok:false, reason:'CHECK_ERROR', error: msg };
   }
 }
+
 
 // ───────────────────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true }));
