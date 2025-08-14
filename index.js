@@ -12,19 +12,6 @@ const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));
 
-// --- helper timingSafeEqual anche se le lunghezze differiscono ---
-function safeEqHex(a, b) {
-  const A = Buffer.from(String(a || ''), 'utf8');
-  const B = Buffer.from(String(b || ''), 'utf8');
-  if (A.length !== B.length) {
-    const max = Math.max(A.length, B.length);
-    const Ap = Buffer.alloc(max, 0); A.copy(Ap);
-    const Bp = Buffer.alloc(max, 0); B.copy(Bp);
-    return crypto.timingSafeEqual(Ap, Bp);
-  }
-  return crypto.timingSafeEqual(A, B);
-}
-
 // ───────────────────────────────────────────────────────────────────────────────
 // Security headers (API-only)
 // ───────────────────────────────────────────────────────────────────────────────
@@ -45,8 +32,8 @@ const ALLOWED = (process.env.ALLOWED_ORIGINS || '')
 
 app.use(cors({
   origin(origin, cb) {
-    if (!origin) return cb(null, true);
-    cb(null, ALLOWED.includes(origin));
+    if (!origin) return cb(null, true);     // consenti curl/postman
+    cb(null, ALLOWED.includes(origin));     // solo origini whitelisted
   },
   credentials: false
 }));
@@ -101,10 +88,22 @@ if (admin.apps.length === 0) admin.initializeApp({ credential: admin.credential.
 const db = admin.firestore();
 
 // ───────────────────────────────────────────────────────────────────────────────
-// Prefill token HMAC (SECRET DEVE essere lo stesso ovunque)
+// HMAC Prefill Token
 // ───────────────────────────────────────────────────────────────────────────────
 const SECRET = process.env.ADMIN_API_KEY || '';
 const PREFILL_TTL_MS = Number(process.env.PREFILL_TTL_MS || 45 * 60 * 1000); // 45 min
+
+function safeEqHex(a, b) {
+  const A = Buffer.from(String(a || ''), 'utf8');
+  const B = Buffer.from(String(b || ''), 'utf8');
+  if (A.length !== B.length) {
+    const max = Math.max(A.length, B.length);
+    const Ap = Buffer.alloc(max, 0); A.copy(Ap);
+    const Bp = Buffer.alloc(max, 0); B.copy(Bp);
+    return crypto.timingSafeEqual(Ap, Bp);
+  }
+  return crypto.timingSafeEqual(A, B);
+}
 
 function createPrefillToken(orderRef, email) {
   const t = Date.now();
@@ -114,7 +113,6 @@ function createPrefillToken(orderRef, email) {
   return `${t}.${sig}.${encodeURIComponent(orderRef)}.${encodeURIComponent(e)}`;
 }
 
-// versione “verbosa”: spiega perché fallisce (EXPIRED, BAD_HMAC, …)
 function verifyPrefillToken(token, orderRefFromBody, emailFromBody) {
   if (!SECRET) return { ok:false, reason:'NO_SECRET' };
 
@@ -152,7 +150,6 @@ function verifyPrefillToken(token, orderRefFromBody, emailFromBody) {
   };
 }
 
-// Helper: prende token da header/query/body e prova a normalizzarlo
 function pickToken(req) {
   const auth  = req.get('authorization') || '';
   const bear  = auth.startsWith('Bearer ') ? auth.slice(7) : '';
@@ -160,7 +157,6 @@ function pickToken(req) {
   const q     = req.query?.token || '';
   const b1    = req.body?.prefillToken || '';
   const b2    = req.body?.token || '';
-
   const candidates = [xhdr, bear, q, b1, b2].filter(Boolean);
   const norm = candidates.map(t => {
     try { return /%[0-9A-Fa-f]{2}/.test(t) ? decodeURIComponent(t) : t; }
@@ -170,7 +166,7 @@ function pickToken(req) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// Solo CARRELLI: config + helper (inattivo se STRICT_CARRELLI=false)
+// Solo CARRELLI (config + helpers)
 // ───────────────────────────────────────────────────────────────────────────────
 const STRICT_CARRELLI = /^(true|1|yes)$/i.test(String(process.env.STRICT_CARRELLI || 'false'));
 const toList = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean).map(x => x.toLowerCase());
@@ -199,18 +195,13 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
 
     const name = String(refInput || '').startsWith('#') ? refInput : `#${refInput}`;
     const restURL = `https://${STORE}/admin/api/${API_VERSION}/orders.json?status=any&name=${encodeURIComponent(name)}`;
-    const r = await fetch(restURL, { headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json' }});
+
+    const r = await fetch(restURL, {
+      headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json' }
+    });
     if (!r.ok) return { ok:false, reason:'REST_FAIL' };
 
-    const data = await r.json();
-    // blocco immediato se non è un carrello
-if (data.carrello && data.carrello.ok === false) {
-  const titolo = data.carrello?.product?.title || 'prodotto non valido';
-  msg(pfMsg, `❌ Questo ordine non è un CARRELLO (${titolo}). La registrazione garanzia è disponibile solo per i carrelli.`, false);
-  form.classList.add('wu-hidden');
-  return;
-}
-
+    const data  = await r.json();
     const order = data?.orders?.[0];
     if (!order) return { ok:false, reason:'ORDINE_NON_TROVATO' };
 
@@ -224,17 +215,28 @@ if (data.carrello && data.carrello.ok === false) {
     for (const line of items) {
       const pid = line.product_id;
       if (!pid) continue;
+
       const pr = await fetch(`https://${STORE}/admin/api/${API_VERSION}/products/${pid}.json`, {
         headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json' }
       });
       if (!pr.ok) continue;
+
       const P = (await pr.json())?.product || {};
       const tagsArr = String(P.tags || '').split(',').map(s => s.trim()).filter(Boolean);
+
       if (isCarrelloMeta({ productType: P.product_type, vendor: P.vendor, tags: tagsArr })) {
-        return { ok:true, product: { id:P.id, title:line.title, type:P.product_type, vendor:P.vendor, tags:tagsArr } };
+        return {
+          ok: true,
+          product: { id: P.id, title: line.title, type: P.product_type, vendor: P.vendor, tags: tagsArr }
+        };
       }
     }
-    return { ok:false, reason:'NON_CARRELLO', product: { title: items[0]?.title || '', id: items[0]?.product_id || null } };
+
+    return {
+      ok: false,
+      reason: 'NON_CARRELLO',
+      product: { title: items[0]?.title || '', id: items[0]?.product_id || null }
+    };
   } catch (e) {
     return { ok:false, reason:'CHECK_ERROR', error: e.message };
   }
@@ -243,6 +245,9 @@ if (data.carrello && data.carrello.ok === false) {
 // ───────────────────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true }));
 
+// ───────────────────────────────────────────────────────────────────────────────
+// Shopify: prefill (ENFORCE SOLO CARRELLI se STRICT_CARRELLI= true/1/yes)
+// ───────────────────────────────────────────────────────────────────────────────
 app.get('/shopify/prefill', async (req, res) => {
   try {
     const STORE = process.env.SHOPIFY_STORE_DOMAIN;
@@ -277,7 +282,7 @@ app.get('/shopify/prefill', async (req, res) => {
             telefono: ship.phone || cust.phone || order.phone || '',
             indirizzo: [ship.address1, ship.address2].filter(Boolean).join(', '),
             citta: ship.city || '', cap: ship.zip || '', provincia: ship.province || '', paese: ship.country || '',
-            modello: line.title || '',
+            modello: line?.title || '',
             dataOrdine: order.created_at || '',
             orderId: order.id, orderName: order.name
           };
@@ -327,18 +332,16 @@ app.get('/shopify/prefill', async (req, res) => {
     const orderRef = prefill.orderName || prefill.orderId;
     const token = SECRET ? createPrefillToken(orderRef, prefill.email) : null;
 
-    // ➜ NOVITÀ: esito “carrello o no” (se STRICT_CARRELLI attivo)
-    let carrello = { ok: true };
+    // ENFORCE "solo carrelli" già al PRE-FILL
     if (STRICT_CARRELLI) {
-      try {
-        const chk = await orderHasCarrelloByRefEmail(orderRef, (prefill.email||'').toLowerCase());
-        carrello = chk;
-      } catch (e) {
-        carrello = { ok:false, reason:'CHECK_ERROR', error:String(e?.message||e) };
+      const chk = await orderHasCarrelloByRefEmail(orderRef, (prefill.email || '').toLowerCase());
+      if (!chk.ok) {
+        console.warn('[PREFILL_NON_CARRELLO]', { ref: orderRef, email: prefill.email, reason: chk.reason, product: chk.product });
+        return res.status(400).json({ ok:false, error:'NON_CARRELLO', product: chk.product || null });
       }
     }
 
-    return res.json({ ok:true, prefill, token, ttl: PREFILL_TTL_MS, carrello });
+    return res.json({ ok:true, prefill, token, ttl: PREFILL_TTL_MS });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ ok:false, error: err.message });
@@ -449,7 +452,6 @@ app.post('/registrazione', regLimiter, async (req, res) => {
       }
     } catch (e) { console.error('Email fallita:', e.message); }
 
-    // ➜ flag per reset UI lato front-end
     return res.json({ ok:true, id: regId, reset: true });
   } catch (err) {
     if (err && (err.code === 6 || /ALREADY_EXISTS/i.test(String(err.message)))) {
