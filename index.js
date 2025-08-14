@@ -88,7 +88,7 @@ if (admin.apps.length === 0) admin.initializeApp({ credential: admin.credential.
 const db = admin.firestore();
 
 // ───────────────────────────────────────────────────────────────────────────────
-/** HMAC Prefill Token */
+// HMAC Prefill Token
 // ───────────────────────────────────────────────────────────────────────────────
 const SECRET = process.env.ADMIN_API_KEY || '';
 const PREFILL_TTL_MS = Number(process.env.PREFILL_TTL_MS || 45 * 60 * 1000); // 45 min
@@ -166,48 +166,13 @@ function pickToken(req) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-/** SOLO CARRELLI: config + helpers (unica sezione) */
+// Solo CARRELLI (switch ENV)
 // ───────────────────────────────────────────────────────────────────────────────
 const STRICT_CARRELLI = /^(true|1|yes)$/i.test(String(process.env.STRICT_CARRELLI || 'false'));
-const toList = s => String(s || '').split(',').map(x => x.trim()).filter(Boolean).map(x => x.toLowerCase());
 
-// Parole chiave utili (tags/type/vendor) – estendibili via ENV
-const CART_TAGS    = toList(process.env.CART_TAGS    || 'carrello,carrelli,trolley,electric trolley,golf trolley,stewart,stewart-golf');
-const CART_TYPES   = toList(process.env.CART_TYPES   || 'carrello,electric trolley,golf trolley');
-const CART_VENDORS = toList(process.env.CART_VENDORS || 'stewart,stewart golf');
-
-// Euristica forte anche sul titolo (copre “Carrelli X10 Follow”, “X9”, “Q-…”, “Follow”, “Remote”)
-const TITLE_RE = /(carrell|trolley|^x[0-9]{1,2}\b|^q[-\s]?\w+|follow|remote)/i;
-
-function isCarrelloMeta({ title, productType, vendor, tags }) {
-  const t = String(productType || '').toLowerCase();
-  const v = String(vendor || '').toLowerCase();
-  const tagArr = Array.isArray(tags)
-    ? tags.map(s => String(s || '').toLowerCase())
-    : String(tags || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-
-  const hasTag    = tagArr.some(tag => CART_TAGS.some(k => tag.includes(k)));
-  const typeOk    = t && CART_TYPES.some(k => t.includes(k));
-  const vendorOk  = v && CART_VENDORS.some(k => v.includes(k));
-  const titleOk   = TITLE_RE.test(String(title || ''));
-
-  return !!(hasTag || typeOk || vendorOk || titleOk);
-}
-
-// fetch JSON con timeout hard (default 12s)
-async function fetchJsonWithTimeout(url, opts = {}, ms = 12000) {
-  const ac = new AbortController();
-  const to = setTimeout(() => ac.abort(new Error('TIMEOUT')), ms);
-  try {
-    const r = await fetch(url, { ...opts, signal: ac.signal });
-    const j = await r.json().catch(() => ({}));
-    return { ok: r.ok, status: r.status, json: j };
-  } finally {
-    clearTimeout(to);
-  }
-}
-
-// Controlla se l'ordine contiene almeno un carrello (GraphQL una sola chiamata)
+// ───────────────────────────────────────────────────────────────────────────────
+// Riconoscimento “carrello” SOLO dai titoli delle linee d’ordine (robusto/semplice)
+// ───────────────────────────────────────────────────────────────────────────────
 async function orderHasCarrelloByRefEmail(refInput, emailLower) {
   try {
     const STORE = process.env.SHOPIFY_STORE_DOMAIN;
@@ -215,39 +180,16 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
     const API_VERSION = process.env.SHOPIFY_API_VERSION || '2024-07';
     if (!STORE || !TOKEN) return { ok:false, reason:'CONFIG_MANCANTE' };
 
+    const TITLE_RE = /(carrell|trolley|^x[0-9]{1,2}\b|^q[-\s]?\w+|follow|remote)/i;
     const name = String(refInput || '').startsWith('#') ? refInput : `#${refInput}`;
-    const query = `
-      query($first:Int!, $query:String!) {
-        orders(first:$first, query:$query, sortKey:CREATED_AT, reverse:true) {
-          edges { node {
-            name email
-            customer { email }
-            lineItems(first:25) {
-              edges { node {
-                title
-                product { id productType vendor tags title }
-              } }
-            }
-          } }
-        }
-      }`;
-    const search = `name:${name} AND email:${emailLower || '*'}`;
 
-    const g = await fetchJsonWithTimeout(
-      `https://${STORE}/admin/api/${API_VERSION}/graphql.json`,
-      {
-        method: 'POST',
-        headers: {
-          'X-Shopify-Access-Token': TOKEN,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ query, variables: { first: 1, query: search } })
-      },
-      12000
-    );
-    if (!g.ok) return { ok:false, reason:'GRAPHQL_FAIL', status:g.status };
+    // Ordine con line_items: basta il REST
+    const url = `https://${STORE}/admin/api/${API_VERSION}/orders.json?status=any&name=${encodeURIComponent(name)}&fields=name,email,customer,line_items`;
+    const r = await fetch(url, { headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json' }});
+    if (!r.ok) return { ok:false, reason:'REST_FAIL', status:r.status };
 
-    const order = g.json?.data?.orders?.edges?.[0]?.node;
+    const data  = await r.json().catch(() => ({}));
+    const order = data?.orders?.[0];
     if (!order) return { ok:false, reason:'ORDINE_NON_TROVATO' };
 
     const orderEmail = (order.email || '').toLowerCase();
@@ -256,37 +198,22 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
       return { ok:false, reason:'EMAIL_MISMATCH' };
     }
 
-    const edges = order.lineItems?.edges || [];
-    for (const e of edges) {
-      const li = e?.node || {};
-      const prod = li.product || {};
-      const tags = String(prod.tags || '').split(',').map(s => s.trim()).filter(Boolean);
-      if (isCarrelloMeta({
-        title: li.title || prod.title,
-        productType: prod.productType,
-        vendor: prod.vendor,
-        tags
-      })) {
-        return {
-          ok: true,
-          product: {
-            id: prod.id || null,
-            title: li.title || prod.title || '',
-            type: prod.productType || '',
-            vendor: prod.vendor || '',
-            tags
-          }
-        };
+    const items = order.line_items || [];
+    for (const line of items) {
+      const title  = String(line?.title || '');
+      const vendor = String(line?.vendor || '');
+      if (TITLE_RE.test(title) || /stewart/i.test(vendor)) {
+        return { ok:true, product: { title, id: line.product_id || null } };
       }
     }
 
-    const firstTitle = edges[0]?.node?.title || '';
-    const firstPid   = edges[0]?.node?.product?.id || null;
+    // Nessuna riga "carrello"
+    const firstTitle = items[0]?.title || '';
+    const firstPid   = items[0]?.product_id || null;
     return { ok:false, reason:'NON_CARRELLO', product: { title:firstTitle, id:firstPid } };
 
   } catch (e) {
-    const msg = String(e && e.message || e || '');
-    if (msg.includes('TIMEOUT')) return { ok:false, reason:'CHECK_TIMEOUT' };
+    const msg = String(e?.message || e || '');
     return { ok:false, reason:'CHECK_ERROR', error: msg };
   }
 }
@@ -295,7 +222,7 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
 app.get('/health', (req, res) => res.json({ ok: true }));
 
 // ───────────────────────────────────────────────────────────────────────────────
-/** Shopify: prefill (ENFORCE SOLO CARRELLI se STRICT_CARRELLI=true) */
+// Shopify: prefill (ENFORCE SOLO CARRELLI se STRICT_CARRELLI=true)
 // ───────────────────────────────────────────────────────────────────────────────
 app.get('/shopify/prefill', async (req, res) => {
   try {
@@ -309,52 +236,79 @@ app.get('/shopify/prefill', async (req, res) => {
     if (!orderParam || !emailParam) return res.status(400).json({ ok:false, error:'PARAMETRI_MANCANTI' });
 
     const name = orderParam.startsWith('#') ? orderParam : `#${orderParam}`;
+    let prefill = null;
 
-    // Unica query GraphQL che recupera tutto ciò che serve per il prefill
-    const q = `
-      query($first:Int!, $query:String!) {
-        orders(first:$first, query:$query, sortKey:CREATED_AT, reverse:true) {
-          edges { node {
-            id name email createdAt
-            customer { email firstName lastName phone }
-            shippingAddress { firstName lastName address1 address2 city zip province country phone }
-            lineItems(first:1){ edges{ node{ title } } }
-          } }
+    // REST: è veloce e sufficiente per prefill
+    const restURL = `https://${STORE}/admin/api/${API_VERSION}/orders.json?status=any&name=${encodeURIComponent(name)}`;
+    const r = await fetch(restURL, { headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json' }});
+    if (r.ok) {
+      const data = await r.json();
+      const order = data?.orders?.[0];
+      if (order) {
+        const orderEmail = (order.email || '').toLowerCase();
+        const custEmail  = (order.customer?.email || '').toLowerCase();
+        if (emailParam === orderEmail || emailParam === custEmail) {
+          const ship = order.shipping_address || {};
+          const cust = order.customer || {};
+          const line = order.line_items?.[0] || {};
+          prefill = {
+            nome: ship.first_name || cust.first_name || '',
+            cognome: ship.last_name || cust.last_name || '',
+            email: order.email || cust.email || '',
+            telefono: ship.phone || cust.phone || order.phone || '',
+            indirizzo: [ship.address1, ship.address2].filter(Boolean).join(', '),
+            citta: ship.city || '', cap: ship.zip || '', provincia: ship.province || '', paese: ship.country || '',
+            modello: line?.title || '',
+            dataOrdine: order.created_at || '',
+            orderId: order.id, orderName: order.name
+          };
         }
-      }`;
-    const search = `name:${name} AND email:${emailParam}`;
-    const g = await fetchJsonWithTimeout(
-      `https://${STORE}/admin/api/${API_VERSION}/graphql.json`,
-      {
+      }
+    }
+
+    // Fallback GraphQL (se REST non ha riempito prefill)
+    if (!prefill) {
+      const q = `
+        query($first:Int!, $query:String!) {
+          orders(first:$first, query:$query, sortKey:CREATED_AT, reverse:true) {
+            edges { node {
+              id name email createdAt
+              customer { email firstName lastName phone }
+              shippingAddress { firstName lastName address1 address2 city zip province country phone }
+              lineItems(first:1){ edges{ node{ title } } }
+            } }
+          }
+        }`;
+      const search = `name:${name} AND email:${emailParam}`;
+      const g = await fetch(`https://${STORE}/admin/api/${API_VERSION}/graphql.json`, {
         method:'POST',
         headers:{ 'X-Shopify-Access-Token':TOKEN, 'Content-Type':'application/json' },
         body: JSON.stringify({ query:q, variables:{ first:1, query:search } })
-      },
-      12000
-    );
-    if (!g.ok) return res.status(502).json({ ok:false, error:'GRAPHQL_FAIL' });
+      });
+      const body = await g.json();
+      const edge = body?.data?.orders?.edges?.[0]?.node;
+      if (edge) {
+        const ship = edge.shippingAddress || {};
+        prefill = {
+          nome: ship.firstName || edge.customer?.firstName || '',
+          cognome: ship.lastName || edge.customer?.lastName || '',
+          email: edge.email || edge.customer?.email || '',
+          telefono: ship.phone || edge.customer?.phone || '',
+          indirizzo: [ship.address1, ship.address2].filter(Boolean).join(', '),
+          citta: ship.city || '', cap: ship.zip || '', provincia: ship.province || '', paese: ship.country || '',
+          modello: edge.lineItems?.edges?.[0]?.node?.title || '',
+          dataOrdine: edge.createdAt || '',
+          orderId: edge.id, orderName: edge.name
+        };
+      }
+    }
 
-    const edge = g.json?.data?.orders?.edges?.[0]?.node;
-    if (!edge) return res.status(404).json({ ok:false, error:'ORDINE_NON_TROVATO' });
+    if (!prefill) return res.status(404).json({ ok:false, error:'ORDINE_NON_TROVATO' });
 
-    const ship = edge.shippingAddress || {};
-    const prefill = {
-      nome: ship.firstName || edge.customer?.firstName || '',
-      cognome: ship.lastName || edge.customer?.lastName || '',
-      email: edge.email || edge.customer?.email || '',
-      telefono: ship.phone || edge.customer?.phone || '',
-      indirizzo: [ship.address1, ship.address2].filter(Boolean).join(', '),
-      citta: ship.city || '', cap: ship.zip || '', provincia: ship.province || '', paese: ship.country || '',
-      modello: edge.lineItems?.edges?.[0]?.node?.title || '',
-      dataOrdine: edge.createdAt || '',
-      orderId: edge.id, orderName: edge.name
-    };
-
-    // Token per la form
     const orderRef = prefill.orderName || prefill.orderId;
     const token = SECRET ? createPrefillToken(orderRef, prefill.email) : null;
 
-    // Enforce SOLO CARRELLI già al prefill
+    // Enforce SOLO CARRELLI al prefill
     if (STRICT_CARRELLI) {
       const chk = await orderHasCarrelloByRefEmail(orderRef, (prefill.email || '').toLowerCase());
       if (!chk.ok) {
@@ -371,7 +325,7 @@ app.get('/shopify/prefill', async (req, res) => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────────
-/** Email template */
+// Email template
 // ───────────────────────────────────────────────────────────────────────────────
 function emailHTML(d) {
   return `<div style="font-family:Arial,sans-serif;line-height:1.5">
@@ -393,7 +347,7 @@ const regLimiter = limitByIp(Number(process.env.RATE_LIMIT_REG_MAX || 5),
                              Number(process.env.RATE_LIMIT_REG_WINDOW || 10 * 60 * 1000));
 
 // ───────────────────────────────────────────────────────────────────────────────
-/** Registrazione */
+// Registrazione
 // ───────────────────────────────────────────────────────────────────────────────
 app.post('/registrazione', regLimiter, async (req, res) => {
   try {
@@ -402,7 +356,7 @@ app.post('/registrazione', regLimiter, async (req, res) => {
 
     const orderRef = p.orderName || p.orderId || '';
 
-    // Token pick + log debug
+    // --- Token pick + log debug ---
     const tok = pickToken(req);
     console.log('[REG]', new Date().toISOString(), {
       origin: req.get('origin'),
@@ -427,7 +381,7 @@ app.post('/registrazione', regLimiter, async (req, res) => {
           provided: { orderRef, email: (p.email || '').toLowerCase() }
         });
       }
-      // Solo carrelli (se abilitato via ENV)
+      // Enforce SOLO CARRELLI anche in registrazione
       if (STRICT_CARRELLI) {
         const ref = (v.decoded?.ref || orderRef || '').trim();
         const em  = (v.decoded?.em || p.email || '').toLowerCase().trim();
@@ -499,7 +453,7 @@ app.post('/registrazione', regLimiter, async (req, res) => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────────
-/** Endpoint di debug token (da rimuovere a fine test) */
+// Endpoint di debug token (da rimuovere a fine test)
 // ───────────────────────────────────────────────────────────────────────────────
 app.post('/debug/token-check', (req, res) => {
   const b = req.body || {};
