@@ -179,7 +179,7 @@ function isCarrelloMeta({ title, productType, tags }) {
     ? tags.map(s => String(s || '').toLowerCase())
     : String(tags || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
   const hasTag   = tagArr.some(tag => CART_TAGS.some(k => tag.includes(k)));
-  const typeOk   = t && CART_TYPES.some(k => t.includes(k)));
+  const typeOk   = t && CART_TYPES.some(k => t.includes(k));   // ← FIX: parentesi
   const titleStr = String(title || '').toLowerCase();
   const titleOk  = /\b(carrell[oi]|trolley)\b/.test(titleStr);
   return !!(hasTag || typeOk || titleOk);
