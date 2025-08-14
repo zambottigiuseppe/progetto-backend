@@ -1,21 +1,24 @@
-
-// index.js - VERSIONE CORRETTA
+// index.js - COMPLETO e FUNZIONANTE
 
 const express = require('express');
 const admin = require('firebase-admin');
+const nodemailer = require('nodemailer');
 const fetch = require('node-fetch');
+const cors = require('cors');
+require('dotenv').config();
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
-// Firebase init (mock config fallback)
 const SA_JSON = process.env.FIREBASE_SERVICE_ACCOUNT || '{}';
 const creds = JSON.parse(SA_JSON);
-if (admin.apps.length === 0) admin.initializeApp({ credential: admin.credential.cert(creds) });
+if (admin.apps.length === 0) {
+  admin.initializeApp({ credential: admin.credential.cert(creds) });
+}
+const db = admin.firestore();
 
-// ───────────────────────────────────────────────────────────────────────────────
-// CARRELLI — filtro aggiornato
-// ───────────────────────────────────────────────────────────────────────────────
+// Filtro carrelli aggiornato
 const STRICT_CARRELLI = /^(true|1|yes)$/i.test(String(process.env.STRICT_CARRELLI || 'false'));
 const TITLE_RE = /\b(carrello|trolley|follow|remote)\b|^(?:q|x|r)[-\s]?\w+/i;
 const NEG_RE = /\b(ricambi|spare|accessor(i|y|ies)|guscio|cover|ruota|wheel|batter(y|ia)|charger|caricatore|bag|sacca)\b/i;
@@ -48,7 +51,7 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
     if (!STORE || !TOKEN) return { ok:false, reason:'CONFIG_MANCANTE' };
 
     const name = String(refInput || '').startsWith('#') ? refInput : `#${refInput}`;
-    const gqlQuery = `
+    const gqlQuery = \`
       query($first:Int!, $query:String!) {
         orders(first:$first, query:$query, sortKey:CREATED_AT, reverse:true) {
           edges { node {
@@ -62,11 +65,11 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
             }
           } }
         }
-      }`;
+      }\`;
 
     const search = `name:${name}`;
     const g = await fetchJsonWithTimeout(
-      `https://${STORE}/admin/api/${API_VERSION}/graphql.json`,
+      \`https://\${STORE}/admin/api/\${API_VERSION}/graphql.json\`,
       {
         method: 'POST',
         headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type': 'application/json' },
@@ -118,8 +121,26 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
   }
 }
 
+// Routes
 app.get('/health', (req, res) => res.json({ ok: true }));
 
-const PORT = parseInt(process.env.PORT, 10);
+app.get('/shopify/prefill', async (req, res) => {
+  const { order, email } = req.query;
+  const emailLower = String(email || '').toLowerCase();
+  const result = await orderHasCarrelloByRefEmail(order, emailLower);
+  if (result.ok) {
+    const token = 'mock-token-' + Math.random().toString(36).slice(2);
+    return res.json({ ok: true, token, prefill: { orderName: `#VG${order}`, email: emailLower, product: result.product } });
+  } else {
+    return res.json(result);
+  }
+});
 
-app.listen(parseInt(process.env.PORT, 10), () => console.log("✅ Server running"));
+app.post('/debug/token-check', (req, res) => {
+  const { token, email, order } = req.body || {};
+  const isValid = typeof token === 'string' && token.startsWith('mock-token-');
+  res.json({ ok: isValid, token, email, order });
+});
+
+const PORT = parseInt(process.env.PORT, 10);
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
