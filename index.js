@@ -1,4 +1,4 @@
-// index.js — REST-only + “solo carrelli” + email con immagine variant + blocco duplicati per ordine
+// index.js — REST-only + “solo carrelli” + email con immagine variant (robusta) + blocco duplicati per ordine
 
 const express = require('express');
 const cors = require('cors');
@@ -100,35 +100,50 @@ const STRICT_CARRELLI = /^(true|1|yes)$/i.test(String(process.env.STRICT_CARRELL
 const TITLE_RE = /(carrell|trolley|follow|remote|^x[0-9]+|^q[-\s]?\w+|^r1s?)/i;
 const NEG_RE   = /\b(ricambi|spare|accessor(i|y|ies)|guscio|cover|ruota|wheel|batter(y|ia)|charger|caricatore|bag|sacca)\b/i;
 
-function isCarrelloMeta({ title, productType }) {
+function isCarrelloMeta({ title, productType, vendor, tags }) {
   const ttl = String(title || '').trim();
   const pty = String(productType || '').trim();
   if (/\bcarrello\b/i.test(ttl)) return true; // “Carrello …” passa subito
   if (NEG_RE.test(ttl) || NEG_RE.test(pty)) return false;
   const titleOk = TITLE_RE.test(ttl);
   const typeOk  = TITLE_RE.test(pty) || /\bgolf\s*trolley\b/i.test(pty);
-  return titleOk || typeOk;
+  const vendOk  = String(vendor || '').toLowerCase().includes('stewart');
+  const tagOk   = Array.isArray(tags) && tags.some(t => String(t||'').toLowerCase().match(/\b(stewart|carrello)\b/));
+  return vendOk || tagOk || titleOk || typeOk;
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
 // Shopify REST helpers (niente GraphQL)
 // ───────────────────────────────────────────────────────────────────────────────
-async function restGetOrderByName(name) {
+function apiBase() {
   const STORE = process.env.SHOPIFY_STORE_DOMAIN;
   const TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
   const API_VERSION = process.env.SHOPIFY_API_VERSION || '2024-07';
-  const url = `https://${STORE}/admin/api/${API_VERSION}/orders.json?status=any&name=${encodeURIComponent(name)}`;
-  const r = await fetch(url, { headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json' }});
+  if (!STORE || !TOKEN) throw new Error('CONFIG_MANCANTE');
+  const base = `https://${STORE}/admin/api/${API_VERSION}`;
+  const headers = { 'X-Shopify-Access-Token': TOKEN, 'Content-Type': 'application/json' };
+  return { base, headers };
+}
+async function restGetOrderByName(name) {
+  const { base, headers } = apiBase();
+  const url = `${base}/orders.json?status=any&name=${encodeURIComponent(name)}`;
+  const r = await fetch(url, { headers });
   if (!r.ok) return { ok:false, status:r.status, json:{} };
   const json = await r.json().catch(()=>({}));
   return { ok:true, status:r.status, json };
 }
 async function restGetProduct(pid) {
-  const STORE = process.env.SHOPIFY_STORE_DOMAIN;
-  const TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
-  const API_VERSION = process.env.SHOPIFY_API_VERSION || '2024-07';
-  const url = `https://${STORE}/admin/api/${API_VERSION}/products/${pid}.json`;
-  const r = await fetch(url, { headers: { 'X-Shopify-Access-Token': TOKEN, 'Content-Type':'application/json' }});
+  const { base, headers } = apiBase();
+  const url = `${base}/products/${pid}.json`;
+  const r = await fetch(url, { headers });
+  if (!r.ok) return { ok:false, status:r.status, json:{} };
+  const json = await r.json().catch(()=>({}));
+  return { ok:true, status:r.status, json };
+}
+async function restGetVariant(vid) {
+  const { base, headers } = apiBase();
+  const url = `${base}/variants/${vid}.json`;
+  const r = await fetch(url, { headers });
   if (!r.ok) return { ok:false, status:r.status, json:{} };
   const json = await r.json().catch(()=>({}));
   return { ok:true, status:r.status, json };
@@ -137,10 +152,6 @@ async function restGetProduct(pid) {
 // Ritorna anche variantId, utile per l’immagine
 async function orderHasCarrelloByRefEmail(refInput, emailLower) {
   try {
-    const STORE = process.env.SHOPIFY_STORE_DOMAIN;
-    const TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
-    if (!STORE || !TOKEN) return { ok:false, reason:'CONFIG_MANCANTE' };
-
     const name = String(refInput || '').startsWith('#') ? refInput : `#${refInput}`;
     const or = await restGetOrderByName(name);
     if (!or.ok) return { ok:false, reason:'REST_FAIL', status: or.status };
@@ -164,29 +175,40 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
       const titleFallback = String(line.title || '');
       if (!firstTitle) { firstTitle = titleFallback; firstPid = pid || null; }
 
-      // Se non c'è product_id → decidi dal titolo riga
-      if (!pid) {
-        if (isCarrelloMeta({ title: titleFallback, productType: '' })) {
-          return { ok:true, product:{ id:null, variantId: vid || null, title:titleFallback, type:'', vendor:'' } };
+      // Se non c'è product_id → prova risalire dal variant
+      let productMeta = { id: pid || null, variantId: vid || null, title: titleFallback, type:'', vendor:'', tags:[] };
+      if (!pid && vid) {
+        const vr = await restGetVariant(vid);
+        const V = vr.json?.variant || {};
+        if (V.product_id) productMeta.id = V.product_id;
+      }
+
+      // Se non ho ancora info prodotto → decidi dal titolo riga
+      if (!productMeta.id) {
+        if (isCarrelloMeta({ title: titleFallback, productType: '', vendor:'', tags:[] })) {
+          return { ok:true, product: productMeta };
         }
         continue;
       }
 
-      // Per il match “forte” usiamo il product_type
-      const pr = await restGetProduct(pid);
+      // Per il match “forte” usiamo il product_type/vendor/tags
+      const pr = await restGetProduct(productMeta.id);
       const P = pr.json?.product || {};
       const titleToCheck = titleFallback || P.title || '';
       const ptype = P.product_type || '';
+      const vendor = P.vendor || '';
+      const tags = P.tags ? String(P.tags).split(',').map(s => s.trim()) : [];
 
-      if (isCarrelloMeta({ title: titleToCheck, productType: ptype })) {
+      if (isCarrelloMeta({ title: titleToCheck, productType: ptype, vendor, tags })) {
         return {
           ok:true,
           product: {
-            id: P.id || pid,
-            variantId: vid || null,
+            id: P.id || productMeta.id,
+            variantId: productMeta.variantId,
             title: titleToCheck,
             type: ptype,
-            vendor: P.vendor || ''
+            vendor,
+            tags
           }
         };
       }
@@ -200,13 +222,33 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
 
 // Ricava l’immagine della variant, se esiste; altrimenti immagine prodotto
 async function resolveVariantImageUrl(productId, variantId) {
-  if (!productId) return null;
-  const pr = await restGetProduct(productId);
+  // Se manca productId ma ho variantId, risalgo al prodotto e all'image_id
+  let resolvedProductId = productId || null;
+  let variantImageId = null;
+
+  if (!resolvedProductId && variantId) {
+    const vr = await restGetVariant(variantId);
+    if (vr.ok) {
+      const V = vr.json?.variant || {};
+      resolvedProductId = V.product_id || null;
+      variantImageId = V.image_id || null;
+    }
+  }
+
+  if (!resolvedProductId) return null;
+
+  const pr = await restGetProduct(resolvedProductId);
   if (!pr.ok) return null;
   const P = pr.json?.product || {};
   if (!P) return null;
 
-  // Se la variant ha image_id, trova l’immagine corrispondente
+  // Se ho già image_id dal variant, mappo subito
+  if (variantImageId && Array.isArray(P.images)) {
+    const im = P.images.find(im => String(im.id) === String(variantImageId));
+    if (im?.src) return im.src;
+  }
+
+  // Oppure cerco la variant per id e uso la sua image_id
   if (variantId && Array.isArray(P.variants)) {
     const v = P.variants.find(v => String(v.id) === String(variantId));
     if (v && v.image_id && Array.isArray(P.images)) {
@@ -214,6 +256,7 @@ async function resolveVariantImageUrl(productId, variantId) {
       if (im?.src) return im.src;
     }
   }
+
   // fallback: immagine principale del prodotto
   return (P.image && P.image.src) || (Array.isArray(P.images) && P.images[0]?.src) || null;
 }
@@ -303,10 +346,6 @@ app.get('/health', (req, res) => res.json({ ok:true }));
 // Prefill (REST + enforce SOLO CARRELLI se STRICT_CARRELLI=true)
 app.get('/shopify/prefill', async (req, res) => {
   try {
-    const STORE = process.env.SHOPIFY_STORE_DOMAIN;
-    const TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
-    if (!STORE || !TOKEN) return res.status(500).json({ ok:false, error:'CONFIG_MANCANTE' });
-
     const orderParam = String(req.query.order || '').trim();
     const emailParam = String(req.query.email || '').trim().toLowerCase();
     if (!orderParam || !emailParam) return res.status(400).json({ ok:false, error:'PARAMETRI_MANCANTI' });
@@ -380,7 +419,7 @@ app.post('/registrazione', regLimiter, async (req, res) => {
           provided: { orderRef, email: (p.email || '').toLowerCase() }
         });
       }
-      // Enforce solo carrelli + ci serve info per immagine
+      // Enforce solo carrelli + info per immagine
       let cartInfo = null;
       if (STRICT_CARRELLI) {
         const ref = (v.decoded?.ref || orderRef || '').trim();
@@ -404,10 +443,11 @@ app.post('/registrazione', regLimiter, async (req, res) => {
       }
 
       // --- Prepara immagine mail (se possibile)
-      var mailImageUrl = null;
-      if (cartInfo?.id) {
+      let mailImageUrl = null;
+      if (cartInfo?.id || cartInfo?.variantId) {
         mailImageUrl = await resolveVariantImageUrl(cartInfo.id, cartInfo.variantId);
       }
+
       // Salva/crea registrazione (id univoco per ordine+seriale)
       const obbligatori = ['email','modello','seriale'];
       const mancanti = obbligatori.filter(k => !p[k]);
