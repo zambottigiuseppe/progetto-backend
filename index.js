@@ -3,21 +3,20 @@
 // ───────────────────────────────────────────────────────────────────────────────
 // Dipendenze
 // ───────────────────────────────────────────────────────────────────────────────
-const express = require('express');
-const cors    = require('cors');
+const express    = require('express');
+const cors       = require('cors');
 const nodemailer = require('nodemailer');
-const admin   = require('firebase-admin');
-const crypto  = require('crypto');
+const admin      = require('firebase-admin');
+const crypto     = require('crypto');
+require('dotenv').config(); // utile in locale; su Render usa le Environment Variables
 
-// opzionale per dev locale (.env). In produzione (Render) non serve.
-
-// Node 18+ ha fetch globale; nessun import di node-fetch necessario.
+// Node 18+ ha fetch globale (nessun import di node-fetch).
 
 // ───────────────────────────────────────────────────────────────────────────────
 // App base
 // ───────────────────────────────────────────────────────────────────────────────
 const app = express();
-app.use(cors()); // se vuoi, restringi con origin: [...]
+app.use(cors()); // se vuoi, restringi con { origin: ['https://verticalgolf.it', ...] }
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));
 
@@ -134,7 +133,7 @@ const regLimiter = limitByIp(Number(process.env.RATE_LIMIT_REG_MAX || 5),
 // ───────────────────────────────────────────────────────────────────────────────
 // Riconoscimento “carrello”
 // ───────────────────────────────────────────────────────────────────────────────
-// includes “Carrello …” o famiglie note; esclude ricambi/accessori
+// include “Carrello …” o famiglie note; esclude ricambi/accessori
 const TITLE_RE = /(carrell|trolley|follow|remote|^x[0-9]+|^q[-\s]?\w+|^r1s?)/i;
 const NEG_RE   = /\b(ricambi|spare|accessor(i|y|ies)|guscio|cover|ruota|wheel|batter(y|ia)|charger|caricatore|bag|sacca)\b/i;
 
@@ -179,7 +178,6 @@ async function resolveVariantImageUrl(productId, variantId){
   const pr = await restGetProduct(productId);
   const P  = pr.json?.product;
   if (!P) return null;
-  // se la variant ha image_id → trova la rispettiva immagine
   if (variantId) {
     const v = (P.variants || []).find(v => String(v.id) === String(variantId));
     const imgId = v?.image_id;
@@ -188,7 +186,6 @@ async function resolveVariantImageUrl(productId, variantId){
       if (img?.src) return img.src;
     }
   }
-  // fallback: immagine principale o prima
   return P.image?.src || (P.images && P.images[0]?.src) || null;
 }
 
@@ -206,7 +203,6 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
     const order = or.json?.orders?.[0];
     if (!order) return { ok:false, reason:'ORDINE_NON_TROVATO' };
 
-    // email match
     const orderEmail = (order.email || '').toLowerCase();
     const custEmail  = (order.customer?.email || '').toLowerCase();
     if (emailLower && !(emailLower === orderEmail || emailLower === custEmail)) {
@@ -223,7 +219,6 @@ async function orderHasCarrelloByRefEmail(refInput, emailLower) {
       const titleFallback = String(line.title || '');
       if (!firstTitle) { firstTitle = titleFallback; firstPid = pid || null; }
 
-      // se non c’è product_id, prova dal titolo
       if (!pid) {
         if (isCarrelloMeta({ title: titleFallback, productType: '' })) {
           return { ok:true, product:{ id:null, variantId: vid || null, title:titleFallback, type:'', vendor:'' } };
@@ -352,46 +347,46 @@ app.get('/shopify/prefill', async (req, res) => {
 // ───────────────────────────────────────────────────────────────────────────────
 app.post('/registrazione', regLimiter, async (req,res)=>{
   try{
-    const p = req.body || {}; 
-    if(p.hp) return res.status(400).json({ok:false,error:'BOT'});
+    const p = req.body || {};
+    if (p.hp) return res.status(400).json({ ok:false, error:'BOT' });
 
-    const dealer = isDealer(req);
+    const dealer   = isDealer(req);
     const orderRef = p.orderName || p.orderId || '';
 
     // ✅ PATCH: bypass prefill se force=1 in query o nel body (e/o dealer)
     const forceFromQuery = isTrueish(req.query?.force);
     const forceFromBody  = isTrueish(p?.force);
     const force = forceFromQuery || forceFromBody;
-    const canBypass = dealer || force; // se vuoi più stretta: (dealer && force)
+    const canBypass = dealer || force; // se vuoi più stretto: (dealer && force)
 
     if (!canBypass) {
       const tok = pickToken(req);
       const token = tok.chosen || p.prefillToken || '';
 
-      if(SECRET){
-        if(!token) return res.status(400).json({ ok: false, error: 'PREFILL_OBBLIGATORIO' });
+      if (SECRET) {
+        if (!token) return res.status(400).json({ ok:false, error: 'PREFILL_OBBLIGATORIO' });
         const v = verifyPrefillToken(token, orderRef, p.email);
-        if (!v.ok) return res.status(400).json({ ok: false, error: 'TOKEN_INVALIDO', reason: v.reason, decoded: v.decoded, provided: { orderRef, email: (p.email || '').toLowerCase() } });
+        if (!v.ok) return res.status(400).json({ ok:false, error: 'TOKEN_INVALIDO', reason: v.reason, decoded: v.decoded, provided: { orderRef, email: (p.email || '').toLowerCase() } });
         if (STRICT_CARRELLI){
           const ref = (v.decoded?.ref || orderRef || '').trim();
           const em  = (v.decoded?.em || p.email || '').toLowerCase().trim();
           const chk = await orderHasCarrelloByRefEmail(ref, em);
-          if (!chk.ok) return res.status(400).json({ ok: false, error: chk.reason, details: chk.product || null });
+          if (!chk.ok) return res.status(400).json({ ok:false, error: chk.reason, details: chk.product || null });
           req._cartInfo = chk.product || null;
         }
       } else {
-        return res.status(500).json({ ok: false, error: 'CONFIG_TOKEN_MANCANTE' });
+        return res.status(500).json({ ok:false, error: 'CONFIG_TOKEN_MANCANTE' });
       }
     }
 
     // Blocco: un ordine “normale” (non dealer) registrabile una sola volta
-    if(!dealer){
-      try{
-        await db.collection('registrazioni_idx').doc(`ORDER__${safeId(orderRef||'SENZA-ORDINE')}`)
-          .create({orderRef,createdAt:admin.firestore.FieldValue.serverTimestamp()});
-      }catch(e){
-        if(e && (e.code===6 || /ALREADY_EXISTS/i.test(String(e.message)))) {
-          return res.status(409).json({ok:false,error:'DUPLICATO_ORDINE'});
+    if (!dealer) {
+      try {
+        await db.collection('registrazioni_idx').doc(`ORDER__${safeId(orderRef || 'SENZA-ORDINE')}`)
+          .create({ orderRef, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+      } catch (e) {
+        if (e && (e.code === 6 || /ALREADY_EXISTS/i.test(String(e.message)))) {
+          return res.status(409).json({ ok:false, error:'DUPLICATO_ORDINE' });
         }
         throw e;
       }
@@ -399,7 +394,7 @@ app.post('/registrazione', regLimiter, async (req,res)=>{
 
     // Immagine email
     let mailImageUrl = null;
-    if(!dealer){
+    if (!dealer) {
       const cartInfo = req._cartInfo || null;
       if (cartInfo?.id || cartInfo?.variantId) {
         mailImageUrl = await resolveVariantImageUrl(cartInfo.id, cartInfo.variantId);
@@ -409,11 +404,11 @@ app.post('/registrazione', regLimiter, async (req,res)=>{
     // Dati minimi
     const obbligatori = ['email','modello','seriale','telefono'];
     const mancanti = obbligatori.filter(k => !p[k]);
-    if(mancanti.length) return res.status(400).json({ok:false,error:'DATI_INSUFFICIENTI',fields:mancanti});
+    if (mancanti.length) return res.status(400).json({ ok:false, error:'DATI_INSUFFICIENTI', fields:mancanti });
 
     // Write
     const serialeNorm = normSerial(p.seriale);
-    const regId = `${safeId(orderRef || (dealer?'RIVENDITORE':'SENZA-ORDINE'))}__${serialeNorm}`;
+    const regId = `${safeId(orderRef || (dealer ? 'RIVENDITORE' : 'SENZA-ORDINE'))}__${serialeNorm}`;
     const docRef = db.collection('registrazioni').doc(regId);
 
     await docRef.create({
@@ -427,14 +422,14 @@ app.post('/registrazione', regLimiter, async (req,res)=>{
     // Log
     const ip = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'unknown';
     await db.collection('registrazioni_log').add({
-      regId, orderRef, seriale: serialeNorm, ip, ua:req.headers['user-agent']||'',
-      origin:req.headers['origin']||'', when:admin.firestore.FieldValue.serverTimestamp(),
-      ok:true, dealer
+      regId, orderRef, seriale: serialeNorm, ip, ua: req.headers['user-agent'] || '',
+      origin: req.headers['origin'] || '', when: admin.firestore.FieldValue.serverTimestamp(),
+      ok: true, dealer
     });
 
     // Email
     try{
-      if(transporter.options.host && transporter.options.auth){
+      if (transporter.options && transporter.options.host && transporter.options.auth) {
         await transporter.sendMail({
           from: EMAIL_FROM,
           to: p.email,
@@ -443,27 +438,27 @@ app.post('/registrazione', regLimiter, async (req,res)=>{
           html: emailHTML({ ...p, seriale: serialeNorm, orderName: orderRef }, mailImageUrl),
         });
       }
-    }catch(e){ console.error('Email fallita:', e.message); }
+    } catch (e) { console.error('Email fallita:', e.message); }
 
-    return res.json({ok:true,id:regId,reset:true,dealer});
-  }catch(err){
-    if(err && (err.code===6 || /ALREADY_EXISTS/i.test(String(err.message)))){
-      try{
-        const p=req.body||{}; 
-        const orderRef=p.orderName||p.orderId||''; 
-        const serialeNorm=normSerial(p.seriale);
-        const ip=req.ip||req.headers['x-forwarded-for']||req.connection.remoteAddress||'unknown';
+    return res.json({ ok:true, id: regId, reset: true, dealer });
+  } catch (err) {
+    if (err && (err.code === 6 || /ALREADY_EXISTS/i.test(String(err.message)))) {
+      try {
+        const p = req.body || {};
+        const orderRef = p.orderName || p.orderId || '';
+        const serialeNorm = normSerial(p.seriale);
+        const ip = req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'unknown';
         await db.collection('registrazioni_log').add({
-          regId:`${safeId(orderRef||'SENZA-ORDINE')}__${serialeNorm}`,
-          orderRef, seriale:serialeNorm, ip, ua:req.headers['user-agent']||'',
-          origin:req.headers['origin']||'', when:admin.firestore.FieldValue.serverTimestamp(),
-          ok:false, error:'DUPLICATO'
+          regId: `${safeId(orderRef || 'SENZA-ORDINE')}__${serialeNorm}`,
+          orderRef, seriale: serialeNorm, ip, ua: req.headers['user-agent'] || '',
+          origin: req.headers['origin'] || '', when: admin.firestore.FieldValue.serverTimestamp(),
+          ok: false, error: 'DUPLICATO'
         });
-      }catch(_){}
-      return res.status(409).json({ok:false,error:'DUPLICATO'});
+      } catch(_) {}
+      return res.status(409).json({ ok:false, error:'DUPLICATO' });
     }
     console.error(err);
-    return res.status(500).json({ok:false,error:String(err?.message||err)});
+    return res.status(500).json({ ok:false, error: String(err?.message || err) });
   }
 });
 
