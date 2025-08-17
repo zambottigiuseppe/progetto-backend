@@ -379,17 +379,19 @@ app.post('/registrazione', regLimiter, async (req,res)=>{
       }
     }
 
-if (!dealer) {
-  const serialeNorm = normSerial(p.seriale);
-  const regId = `${safeId(orderRef || 'SENZA-ORDINE')}__${serialeNorm}`;
-  const regDoc = await db.collection('registrazioni').doc(regId).get();
-  if (regDoc.exists) {
-    return res.status(409).json({ ok:false, error:'DUPLICATO' });
-  }
-}
+    // Normalizza seriale e crea ID registrazione
+    const serialeNorm = normSerial(p.seriale);
+    const regId = `${safeId(orderRef || (dealer ? 'RIVENDITORE' : 'SENZA-ORDINE'))}__${serialeNorm}`;
 
+    // Blocco: se non dealer, verifica che non sia già registrato
+    if (!dealer) {
+      const regDoc = await db.collection('registrazioni').doc(regId).get();
+      if (regDoc.exists) {
+        return res.status(409).json({ ok:false, error:'DUPLICATO' });
+      }
+    }
 
-    // Immagine email
+    // Immagine email (solo se disponibile e non dealer)
     let mailImageUrl = null;
     if (!dealer) {
       const cartInfo = req._cartInfo || null;
@@ -398,16 +400,13 @@ if (!dealer) {
       }
     }
 
-    // Dati minimi
+    // Dati minimi obbligatori
     const obbligatori = ['email','modello','seriale','telefono'];
     const mancanti = obbligatori.filter(k => !p[k]);
     if (mancanti.length) return res.status(400).json({ ok:false, error:'DATI_INSUFFICIENTI', fields:mancanti });
 
-    // Write
-    const serialeNorm = normSerial(p.seriale);
-    const regId = `${safeId(orderRef || (dealer ? 'RIVENDITORE' : 'SENZA-ORDINE'))}__${serialeNorm}`;
+    // Scrittura su Firestore
     const docRef = db.collection('registrazioni').doc(regId);
-
     await docRef.create({
       ...p,
       seriale: serialeNorm,
