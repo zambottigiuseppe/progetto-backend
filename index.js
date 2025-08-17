@@ -380,17 +380,13 @@ app.post('/registrazione', regLimiter, async (req,res)=>{
     }
 
     // Blocco: un ordine “normale” (non dealer) registrabile una sola volta
-    if (!dealer) {
-      try {
-        await db.collection('registrazioni_idx').doc(`ORDER__${safeId(orderRef || 'SENZA-ORDINE')}`)
-          .create({ orderRef, createdAt: admin.firestore.FieldValue.serverTimestamp() });
-      } catch (e) {
-        if (e && (e.code === 6 || /ALREADY_EXISTS/i.test(String(e.message)))) {
-          return res.status(409).json({ ok:false, error:'DUPLICATO_ORDINE' });
-        }
-        throw e;
-      }
-    }
+    // Blocco: consenti più registrazioni con stesso ordine, blocca solo seriale già registrato
+if (!dealer) {
+  const regDoc = await db.collection('registrazioni').doc(regId).get();
+  if (regDoc.exists) {
+    return res.status(409).json({ ok:false, error:'DUPLICATO' });
+  }
+}
 
     // Immagine email
     let mailImageUrl = null;
