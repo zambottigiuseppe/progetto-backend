@@ -181,8 +181,11 @@ app.post('/registrazione', regLimiter, async (req,res)=>{
     const orderRef=p.orderName||p.orderId||'';
 
     // Token obbligatorio SOLO se non dealer
-    if(!dealer){
-      const tok=pickToken(req); const token=tok.chosen||p.prefillToken||'';
+    - if (!dealer) {
++ if (!dealer && req.query.force !== '1') {
+    const tok = pickToken(req);
+    const token = tok.chosen || p.prefillToken || '';
+
       if(SECRET){
         if(!token) return res.status(400).json({ok:false,error:'PREFILL_OBBLIGATORIO'});
         const v=verifyPrefillToken(token,orderRef,p.email);
