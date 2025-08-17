@@ -10,7 +10,6 @@ const admin   = require('firebase-admin');
 const crypto  = require('crypto');
 
 // opzionale per dev locale (.env). In produzione (Render) non serve.
-try { require('dotenv').config(); } catch(_) {}
 
 // Node 18+ ha fetch globale; nessun import di node-fetch necessario.
 
