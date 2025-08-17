@@ -379,14 +379,15 @@ app.post('/registrazione', regLimiter, async (req,res)=>{
       }
     }
 
-    // Blocco: un ordine “normale” (non dealer) registrabile una sola volta
-    // Blocco: consenti più registrazioni con stesso ordine, blocca solo seriale già registrato
 if (!dealer) {
+  const serialeNorm = normSerial(p.seriale);
+  const regId = `${safeId(orderRef || 'SENZA-ORDINE')}__${serialeNorm}`;
   const regDoc = await db.collection('registrazioni').doc(regId).get();
   if (regDoc.exists) {
     return res.status(409).json({ ok:false, error:'DUPLICATO' });
   }
 }
+
 
     // Immagine email
     let mailImageUrl = null;
